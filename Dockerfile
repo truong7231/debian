@@ -1,72 +1,73 @@
-# ===============================
-#   DEBIAN SLIM + noVNC + Chromium
-#   Railway Ready (PORT exposed)
-# ===============================
-FROM debian:bookworm-slim
+# Alpine nhỏ, pull nhanh; lưu ý: RAM khi chạy Chromium vẫn là chính
+FROM alpine:3.23
 
-ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Ho_Chi_Minh
 ENV PORT=8080
 
 ENV DISPLAY=:99
 ENV VNC_PORT=5900
 
-# -------------------------------
-# Base packages (no recommends)
-# -------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl tzdata \
-    xvfb fluxbox x11vnc \
-    dbus-x11 xauth x11-xserver-utils \
-    fonts-dejavu \
+# Bật community repo (novnc/websockify/x11vnc/xvfb thường nằm ở community)
+RUN set -eux; \
+  ALPINE_VER="$(cut -d. -f1,2 /etc/alpine-release)"; \
+  echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main" > /etc/apk/repositories; \
+  echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/community" >> /etc/apk/repositories; \
+  apk add --no-cache \
+    ca-certificates tzdata \
+    # X virtual framebuffer + WM
+    xvfb fluxbox \
+    # VNC server + noVNC/websockify
+    x11vnc novnc websockify \
     # Browser
     chromium \
-    # noVNC + websockify
-    novnc websockify \
-    && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && dpkg-reconfigure -f noninteractive tzdata \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    # Fonts (tránh lỗi ô vuông)
+    ttf-dejavu fontconfig \
+  ; \
+  update-ca-certificates
 
-# Debian novnc package thường đặt web ở /usr/share/novnc
-# Tạo index.html cho tiện
-RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html || true
+# noVNC thường nằm ở /usr/share/novnc, tạo index.html cho tiện
+RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html 2>/dev/null || true
 
-# -------------------------------
-# Entrypoint
-# -------------------------------
 RUN cat > /usr/local/bin/start-gui.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-echo "Timezone: ${TZ}"
-echo "Railway PORT: ${PORT}"
-echo "DISPLAY: ${DISPLAY}"
+echo "TZ=${TZ}"
+echo "PORT=${PORT}"
+echo "DISPLAY=${DISPLAY}"
 
-rm -f /tmp/.X99-lock || true
-rm -rf /tmp/.X11-unix/X99 || true
+# Xvfb lock cleanup (an toàn khi restart)
+rm -f /tmp/.X99-lock 2>/dev/null || true
+rm -rf /tmp/.X11-unix/X99 2>/dev/null || true
 mkdir -p /tmp/.X11-unix
 
 echo "Starting Xvfb..."
-# Giảm RAM: hạ resolution + depth 16-bit
-Xvfb ${DISPLAY} -screen 0 1024x576x16 -nolisten tcp -ac &
-
+# Hạ RAM: giảm resolution + 16-bit depth
+Xvfb "${DISPLAY}" -screen 0 800x450x16 -nolisten tcp -ac &
 sleep 1
+
 echo "Starting window manager (fluxbox)..."
-fluxbox &
+fluxbox >/dev/null 2>&1 &
+sleep 1
 
 echo "Starting VNC server..."
-x11vnc -display ${DISPLAY} -forever -shared -rfbport ${VNC_PORT} -nopw -noxrecord -noxfixes -noxdamage &
+x11vnc \
+  -display "${DISPLAY}" \
+  -forever -shared \
+  -rfbport "${VNC_PORT}" \
+  -nopw \
+  -noxrecord -noxfixes -noxdamage \
+  >/dev/null 2>&1 &
 
 echo "Starting noVNC on 0.0.0.0:${PORT} -> localhost:${VNC_PORT}"
-websockify --web=/usr/share/novnc 0.0.0.0:${PORT} localhost:${VNC_PORT} &
+websockify --web=/usr/share/novnc "0.0.0.0:${PORT}" "localhost:${VNC_PORT}" >/dev/null 2>&1 &
 
-echo "Starting Chromium..."
-# Flags giảm tài nguyên:
-# - --no-sandbox: cần cho container không đặc quyền (chấp nhận trade-off bảo mật)
-# - --disable-dev-shm-usage: tránh /dev/shm nhỏ gây crash
-# - tắt GPU/extension/background noise
-# - có thể thêm --blink-settings=imagesEnabled=false để tắt ảnh (nếu chỉ “treo”)
+echo "Starting Chromium (non-headless)..."
+# Mẹo giảm tài nguyên:
+# - renderer-process-limit=1: giới hạn renderer process
+# - tắt sync/extension/background networking
+# - tắt ảnh nếu chỉ cần điều khiển logic (bạn có thể bỏ dòng blink-settings nếu cần xem hình)
+# - user-data-dir đặt ở /tmp để tránh phình disk cache
 while true; do
   chromium \
     --no-sandbox \
@@ -78,7 +79,12 @@ while true; do
     --metrics-recording-only \
     --no-first-run \
     --disable-features=Translate,BackForwardCache,PreloadMediaEngagementData,MediaRouter \
-    about:blank || true
+    --renderer-process-limit=1 \
+    --disk-cache-size=1 \
+    --media-cache-size=1 \
+    --user-data-dir=/tmp/chrome-profile \
+    --blink-settings=imagesEnabled=false \
+    about:blank >/dev/null 2>&1 || true
   sleep 1
 done
 EOF

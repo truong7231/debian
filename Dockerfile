@@ -43,7 +43,7 @@ mkdir -p /tmp/.X11-unix
 
 echo "Starting Xvfb..."
 # Hạ RAM: giảm resolution + 16-bit depth
-Xvfb "${DISPLAY}" -screen 0 800x450x16 -nolisten tcp -ac &
+Xvfb "${DISPLAY}" -screen 0 1366x768x16 -nolisten tcp -ac &
 sleep 1
 
 echo "Starting window manager (fluxbox)..."
